@@ -324,6 +324,7 @@ private:
     std::thread m_distroExitThread;
     std::thread m_virtioFsThread;
     std::thread m_virtualSmbThread;
+    std::thread m_virtualSmbSymlinkThread;
     std::thread m_crashDumpCollectionThread;
 
     wil::srwlock m_persistentMemoryLock;

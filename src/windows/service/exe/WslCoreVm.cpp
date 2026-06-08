@@ -14,6 +14,7 @@ Abstract:
 
 #include "precomp.h"
 #include "WslCoreVm.h"
+#include "VsmbSymlinkUnlock.h"
 #include "WslCoreNetworkingSupport.h"
 #include <lxfsshares.h>
 #include "disk.hpp"
@@ -771,6 +772,11 @@ WslCoreVm::~WslCoreVm() noexcept
     if (m_virtualSmbThread.joinable())
     {
         m_virtualSmbThread.join();
+    }
+
+    if (m_virtualSmbSymlinkThread.joinable())
+    {
+        m_virtualSmbSymlinkThread.join();
     }
 
     if (m_crashDumpCollectionThread.joinable())
@@ -2517,6 +2523,12 @@ void WslCoreVm::RegisterCallbacks(_In_ const std::function<void(ULONG)>& DistroE
         // Create a thread listening for handling VirtualSmb share requests.
         auto listenSocket = wsl::windows::common::hvsocket::Listen(m_runtimeId, LX_INIT_UTILITY_VM_VIRTUALSMB_PORT);
         m_virtualSmbThread = std::thread(&WslCoreVm::VirtualSmbWorker, this, std::move(listenSocket));
+
+        // Unlock symlink creation through VSMB shares: the host VSMB server gates it on a
+        // per-session IsAdmin flag with no HCS/share-Option equivalent, so flip it once the
+        // guest's SMB2 session is established (one-shot; see VsmbSymlinkUnlock.h).
+        m_virtualSmbSymlinkThread =
+            std::thread(&wsl::windows::service::UnlockVirtualSmbSymlinks, m_runtimeId, m_terminatingEvent.get());
     }
 }
 
