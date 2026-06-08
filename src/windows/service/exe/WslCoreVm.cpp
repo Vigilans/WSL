@@ -768,6 +768,11 @@ WslCoreVm::~WslCoreVm() noexcept
         m_virtioFsThread.join();
     }
 
+    if (m_virtualSmbThread.joinable())
+    {
+        m_virtualSmbThread.join();
+    }
+
     if (m_crashDumpCollectionThread.joinable())
     {
         m_crashDumpCollectionThread.join();
@@ -1241,6 +1246,7 @@ std::shared_ptr<LxssRunningInstance> WslCoreVm::CreateInstanceInternal(
     ULONG featureFlags{};
     WI_SetFlagIf(featureFlags, LxInitFeatureVirtIo9p, m_vmConfig.EnableVirtio9p);
     WI_SetFlagIf(featureFlags, LxInitFeatureVirtIoFs, m_vmConfig.EnableVirtioFs);
+    WI_SetFlagIf(featureFlags, LxInitFeatureVirtualSmb, m_vmConfig.EnableVirtualSmb);
     WI_SetFlagIf(featureFlags, LxInitFeatureDnsTunneling, m_vmConfig.EnableDnsTunneling);
 
     // Create an instance, this takes ownership of the sockets.
@@ -1768,6 +1774,16 @@ std::wstring WslCoreVm::GenerateConfigJson()
     hvSocketConfig.HvSocketConfig.DefaultConnectSecurityDescriptor = securityDescriptor;
     vmSettings.Devices.HvSocket = std::move(hvSocketConfig);
 
+    // The VirtualSmb device must be declared at VM creation time; individual DrvFs shares are
+    // hot-added later via HcsModifyComputeSystem (see AddVirtualSmbShare). Declaring the device is
+    // what makes the hypervisor create the VSMB VMBus channel that hv_vmsmb binds to.
+    if (m_vmConfig.EnableVirtualSmb)
+    {
+        hcs::VirtualSmbDevice virtualSmb{};
+        virtualSmb.DirectFileMappingInMB = static_cast<uint64_t>(m_vmConfig.VirtualSmbDirectFileMappingInMB);
+        vmSettings.Devices.VirtualSmb = std::move(virtualSmb);
+    }
+
     // N.B. Plan9 device is always added during serialization
 
     systemSettings.VirtualMachine = std::move(vmSettings);
@@ -2226,6 +2242,58 @@ std::pair<std::wstring, std::wstring> WslCoreVm::AddVirtioFsShare(_In_ bool Admi
     return {tag, sharePath};
 }
 
+_Requires_lock_held_(m_guestDeviceLock)
+std::pair<std::wstring, std::wstring> WslCoreVm::AddVirtualSmbShare(_In_ bool Admin, _In_ PCWSTR Path)
+{
+    WI_ASSERT(m_vmConfig.EnableVirtualSmb);
+
+    const auto sharePath = std::filesystem::weakly_canonical(Path).wstring();
+
+    // Admin and non-admin contexts get distinct shares for the same path.
+    const std::wstring key = (Admin ? L"1|" : L"0|") + sharePath;
+
+    bool created = false;
+    std::wstring name;
+    if (const auto existing = m_virtualSmbShares.find(key); existing != m_virtualSmbShares.end())
+    {
+        name = existing->second;
+    }
+    else
+    {
+        // Generate a unique share name. A GUID without braces (36 chars) fits the SMB share name limit.
+        GUID nameGuid{};
+        THROW_IF_FAILED(CoCreateGuid(&nameGuid));
+        name = wsl::shared::string::GuidToString<wchar_t>(nameGuid, wsl::shared::string::None);
+
+        // Hot-add the share to the VirtualSmb device that was declared at VM creation time.
+        hcs::ModifySettingRequest<hcs::VirtualSmbShare> request{};
+        request.ResourcePath = L"VirtualMachine/Devices/VirtualSmb/Shares";
+        request.RequestType = hcs::ModifyRequestType::Add;
+        request.Settings.Name = name;
+        request.Settings.Path = sharePath;
+
+        // TakeBackupPrivilege lets the host server open files the way DrvFs expects; UseShareRootIdentity
+        // opens files using the identity that opened the share root.
+        request.Settings.Options.TakeBackupPrivilege = true;
+        request.Settings.Options.UseShareRootIdentity = true;
+
+        wsl::windows::common::hcs::ModifyComputeSystem(m_system.get(), wsl::shared::ToJsonW(request).c_str());
+
+        m_virtualSmbShares.emplace(key, name);
+        created = true;
+    }
+
+    WSL_LOG(
+        "WslCoreVmAddVirtualSmbShare",
+        TraceLoggingValue(Admin, "admin"),
+        TraceLoggingValue(sharePath.c_str(), "path"),
+        TraceLoggingValue(name.c_str(), "name"),
+        TraceLoggingValue(created, "created"),
+        TraceLoggingValue(m_virtualSmbShares.size(), "shareCount"));
+
+    return {name, sharePath};
+}
+
 void WslCoreVm::OnCrash(_In_ LPCWSTR Details)
 {
     if (m_vmCrashEvent.is_signaled())
@@ -2442,6 +2510,13 @@ void WslCoreVm::RegisterCallbacks(_In_ const std::function<void(ULONG)>& DistroE
         // Create a thread listening for handling virtiofs requests.
         auto listenSocket = wsl::windows::common::hvsocket::Listen(m_runtimeId, LX_INIT_UTILITY_VM_VIRTIOFS_PORT);
         m_virtioFsThread = std::thread(&WslCoreVm::VirtioFsWorker, this, std::move(listenSocket));
+    }
+
+    if (m_vmConfig.EnableHostFileSystemAccess && m_vmConfig.EnableVirtualSmb)
+    {
+        // Create a thread listening for handling VirtualSmb share requests.
+        auto listenSocket = wsl::windows::common::hvsocket::Listen(m_runtimeId, LX_INIT_UTILITY_VM_VIRTUALSMB_PORT);
+        m_virtualSmbThread = std::thread(&WslCoreVm::VirtualSmbWorker, this, std::move(listenSocket));
     }
 }
 
@@ -2680,6 +2755,65 @@ try
                 {
                     THROW_HR_MSG(E_UNEXPECTED, "Unexpected MessageType %d", message->MessageType);
                 }
+            }
+            CATCH_LOG()
+        }).detach();
+    }
+}
+CATCH_LOG()
+
+void WslCoreVm::VirtualSmbWorker(_In_ const wil::unique_socket& listenSocket)
+try
+{
+    wsl::windows::common::wslutil::SetThreadDescription(L"VirtualSmb - Worker");
+
+    for (;;)
+    {
+        // Create a worker thread to handle each request.
+
+        auto socket = hvsocket::CancellableAccept(listenSocket.get(), INFINITE, m_terminatingEvent.get());
+        if (!socket.has_value())
+        {
+            break;
+        }
+
+        wsl::shared::SocketChannel channel{std::move(socket.value()), "VirtualSmb", {m_terminatingEvent.get()}};
+        std::thread([this, channel = std::move(channel)]() mutable {
+            try
+            {
+                wsl::windows::common::wslutil::SetThreadDescription(L"VirtualSmb - Request");
+
+                auto transaction = channel.ReceiveTransaction();
+                auto [message, span] = transaction.ReceiveOrClosed<MESSAGE_HEADER>();
+                if (message == nullptr)
+                {
+                    return;
+                }
+
+                THROW_HR_IF_MSG(
+                    E_UNEXPECTED, message->MessageType != LxInitMessageAddVirtualSmbShare, "Unexpected MessageType %d", message->MessageType);
+
+                std::wstring name;
+                std::wstring source;
+                const auto result = wil::ResultFromException([this, span, &name, &source]() {
+                    const auto* addShare = gslhelpers::try_get_struct<LX_INIT_ADD_VIRTUALSMB_SHARE_MESSAGE>(span);
+                    THROW_HR_IF(E_UNEXPECTED, !addShare);
+
+                    const auto path = wsl::shared::string::FromSpan(span, addShare->PathOffset);
+                    const auto pathWide = wsl::shared::string::MultiByteToWide(path);
+
+                    // Acquire the lock and attempt to add the share.
+                    auto guestDeviceLock = m_guestDeviceLock.lock_exclusive();
+                    std::tie(name, source) = AddVirtualSmbShare(addShare->Admin, pathWide.c_str());
+                });
+
+                // Respond to the guest with the share name that should be used to mount the share.
+                wsl::shared::MessageWriter<LX_INIT_ADD_VIRTUALSMB_SHARE_RESPONSE_MESSAGE> response(LxInitMessageAddVirtualSmbShareResponse);
+                response->Result = SUCCEEDED(result) ? 0 : EINVAL; // TODO: Improved HRESULT -> errno mapping.
+                response.WriteString(response->NameOffset, name);
+                response.WriteString(response->SourceOffset, source);
+
+                transaction.Send<LX_INIT_ADD_VIRTUALSMB_SHARE_RESPONSE_MESSAGE>(response.Span());
             }
             CATCH_LOG()
         }).detach();

@@ -410,6 +410,47 @@ inline void to_json(nlohmann::json& j, const EmptyObject& memory)
     j = nlohmann::json::object();
 }
 
+struct VirtualSmbShareOptions
+{
+    bool TakeBackupPrivilege = false;
+    bool UseShareRootIdentity = false;
+};
+
+inline void to_json(nlohmann::json& j, const VirtualSmbShareOptions& options)
+{
+    j = nlohmann::json::object();
+
+    // HCS treats absent options as false, so only emit the flags that are set.
+    if (options.TakeBackupPrivilege)
+        j["TakeBackupPrivilege"] = true;
+    if (options.UseShareRootIdentity)
+        j["UseShareRootIdentity"] = true;
+}
+
+struct VirtualSmbShare
+{
+    std::wstring Name;
+    std::wstring Path;
+    VirtualSmbShareOptions Options;
+};
+
+inline void to_json(nlohmann::json& j, const VirtualSmbShare& share)
+{
+    j = nlohmann::json{{"Name", share.Name}, {"Path", share.Path}, {"Options", share.Options}};
+}
+
+struct VirtualSmbDevice
+{
+    uint64_t DirectFileMappingInMB = 2048;
+};
+
+inline void to_json(nlohmann::json& j, const VirtualSmbDevice& vsmb)
+{
+    j = nlohmann::json::object();
+    if (vsmb.DirectFileMappingInMB > 0)
+        j["DirectFileMappingInMB"] = vsmb.DirectFileMappingInMB;
+}
+
 struct HvSocketSystemConfig
 {
     std::wstring DefaultBindSecurityDescriptor;
@@ -511,6 +552,7 @@ struct Devices
     std::map<std::string, ComPort> ComPorts;
     EmptyObject Plan9;
     EmptyObject Battery;
+    std::optional<VirtualSmbDevice> VirtualSmb;
     HvSocket HvSocket;
     std::map<std::string, Scsi> Scsi;
     std::optional<VirtualPMemController> VirtualPMem;
@@ -526,6 +568,7 @@ inline void to_json(nlohmann::json& j, const Devices& devices)
         {"Scsi", devices.Scsi}};
 
     OMIT_IF_EMPTY(j, devices, VirtioSerial);
+    OMIT_IF_EMPTY(j, devices, VirtualSmb);
     OMIT_IF_EMPTY(j, devices, VirtualPMem);
 }
 

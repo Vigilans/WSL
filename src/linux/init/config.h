@@ -26,6 +26,7 @@ Abstract:
 
 #define WSL_USE_VIRTIO_9P() (WI_IsFlagSet(UtilGetFeatureFlags(), LxInitFeatureVirtIo9p))
 #define WSL_USE_VIRTIO_FS() (WI_IsFlagSet(UtilGetFeatureFlags(), LxInitFeatureVirtIoFs))
+#define WSL_USE_VIRTUAL_SMB() (WI_IsFlagSet(UtilGetFeatureFlags(), LxInitFeatureVirtualSmb))
 #define WSLG_SHARED_FOLDER "wslg"
 
 #define INIT_MAKE_SECURITY(_uid, _gid, _mode) {_uid, _gid, _mode}

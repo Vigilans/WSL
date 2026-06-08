@@ -29,6 +29,10 @@ int MountPlan9(const char* Source, const char* Target, const char* Options, std:
 
 int MountVirtioFs(const char* Source, const char* Target, const char* Options, std::optional<bool> Admin, const wsl::linux::WslDistributionConfig& Config, int* ExitCode = nullptr);
 
+int MountVirtualSmb(const char* Source, const char* Target, const char* Options, std::optional<bool> Admin, const wsl::linux::WslDistributionConfig& Config, int* ExitCode = nullptr);
+
 int RemountVirtioFs(const char* Tag, const char* Target, const char* Options, bool Admin);
 
 std::string QueryVirtiofsMountSource(const char* Tag);
+
+std::string QueryVsmbMountSource(const char* Name);

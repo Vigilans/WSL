@@ -931,6 +931,16 @@ try
 
             MountEnum.Current().Source = MountSource.data();
         }
+        else if (strcmp(MountEnum.Current().FileSystemType, VSMB_FS_TYPE) == 0)
+        {
+            MountSource = QueryVsmbMountSource(MountEnum.Current().Source);
+            if (MountSource.empty())
+            {
+                continue;
+            }
+
+            MountEnum.Current().Source = MountSource.data();
+        }
         else if (strcmp(MountEnum.Current().FileSystemType, DRVFS_FS_TYPE) == 0)
         {
             //

@@ -1736,6 +1736,10 @@ Return Value:
         {
             MountSource = QueryVirtiofsMountSource(MountEnum.Current().Source);
         }
+        else if (strcmp(MountEnum.Current().FileSystemType, VSMB_FS_TYPE) == 0)
+        {
+            MountSource = QueryVsmbMountSource(MountEnum.Current().Source);
+        }
         else
         {
             continue;

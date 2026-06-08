@@ -83,6 +83,8 @@ void wsl::core::Config::ParseConfigFile(_In_opt_ LPCWSTR ConfigFilePath, _In_opt
         ConfigKey(ConfigSetting::NestedVirtualization, EnableNestedVirtualization),
         ConfigKey(ConfigSetting::Virtio9p, EnableVirtio9p),
         ConfigKey(ConfigSetting::Virtiofs, EnableVirtioFs),
+        ConfigKey(ConfigSetting::VirtualSmb, EnableVirtualSmb),
+        ConfigKey(ConfigSetting::VirtualSmbDirectFileMapping, VirtualSmbDirectFileMappingInMB),
         ConfigKey(ConfigSetting::KernelDebugPort, KernelDebugPort),
         ConfigKey(ConfigSetting::GpuSupport, EnableGpuSupport),
         ConfigKey(ConfigSetting::GuiApplications, EnableGuiApps),
@@ -453,6 +455,13 @@ void wsl::core::Config::Initialize(_In_opt_ HANDLE UserToken)
     {
         EMIT_USER_WARNING(wsl::shared::Localization::MessageConfigVirtio9pDisabled());
         EnableVirtio9p = false;
+    }
+
+    if (EnableVirtualSmb)
+    {
+        // VirtualSmb is a VMBus storage device and is mutually exclusive with the other
+        // DrvFs backends. When both are requested, VirtualSmb takes precedence over virtiofs.
+        VALIDATE_CONFIG_OPTION(EnableVirtualSmb, EnableVirtioFs, false);
     }
 
     // Compute a default swiotlb config only when a virtio device that requires bounce buffers is present.

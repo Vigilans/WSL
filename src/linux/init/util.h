@@ -64,6 +64,7 @@ struct WslDistributionConfig;
 
 #define PLAN9_FS_TYPE "9p"
 #define VIRTIO_FS_TYPE "virtiofs"
+#define VSMB_FS_TYPE "vsmb"
 
 #define PATH_SEP '/'
 #define PATH_SEP_NT '\\'

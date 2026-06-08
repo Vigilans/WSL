@@ -185,6 +185,9 @@ private:
     _Requires_lock_held_(m_guestDeviceLock)
     std::pair<std::wstring, std::wstring> AddVirtioFsShare(_In_ bool Admin, _In_ PCWSTR Path, _In_ PCWSTR Options, _In_opt_ HANDLE UserToken = nullptr);
 
+    _Requires_lock_held_(m_guestDeviceLock)
+    std::pair<std::wstring, std::wstring> AddVirtualSmbShare(_In_ bool Admin, _In_ PCWSTR Path);
+
     _Requires_lock_held_(m_lock)
     ULONG AttachDiskLockHeld(_In_ PCWSTR Disk, _In_ DiskType Type, _In_ MountFlags Flags, _In_ std::optional<ULONG> Lun, _In_ bool IsUserDisk, _In_ HANDLE UserToken);
 
@@ -251,6 +254,8 @@ private:
 
     void VirtioFsWorker(_In_ const wil::unique_socket& socket);
 
+    void VirtualSmbWorker(_In_ const wil::unique_socket& socket);
+
     static std::string s_GetMountTargetName(_In_ PCWSTR Disk, _In_opt_ PCWSTR Name, _In_ int PartitionIndex);
 
     static LX_INIT_DRVFS_MOUNT s_InitializeDrvFs(_Inout_ WslCoreVm* VmContext, _In_ HANDLE UserToken);
@@ -263,6 +268,8 @@ private:
     _Guarded_by_(m_guestDeviceLock) wil::unique_handle m_drvfsToken;
     _Guarded_by_(m_guestDeviceLock) wil::unique_handle m_adminDrvfsToken;
     _Guarded_by_(m_guestDeviceLock) std::map<VirtioFsShare, std::wstring> m_virtioFsShares;
+    // Maps a canonical host path (prefixed with the admin flag) to the generated VirtualSmb share name.
+    _Guarded_by_(m_guestDeviceLock) std::map<std::wstring, std::wstring> m_virtualSmbShares;
     _Guarded_by_(m_guestDeviceLock) std::map<UINT32, wil::com_ptr<IPlan9FileSystem>> m_plan9Servers;
     wil::srwlock m_lock;
     _Guarded_by_(m_lock) wil::unique_event m_terminatingEvent { wil::EventOptions::ManualReset };
@@ -316,6 +323,7 @@ private:
     std::wstring m_debugShellPipe;
     std::thread m_distroExitThread;
     std::thread m_virtioFsThread;
+    std::thread m_virtualSmbThread;
     std::thread m_crashDumpCollectionThread;
 
     wil::srwlock m_persistentMemoryLock;

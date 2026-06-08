@@ -118,6 +118,7 @@ Abstract:
 #define LX_INIT_UTILITY_VM_PLAN9_DRVFS_ADMIN_PORT (50003)
 #define LX_INIT_UTILITY_VM_VIRTIOFS_PORT (50004)
 #define LX_INIT_UTILITY_VM_CRASH_DUMP_PORT (50005)
+#define LX_INIT_UTILITY_VM_VIRTUALSMB_PORT (50006)
 
 //
 // HvSocket buffer size for 9p connections.
@@ -410,6 +411,8 @@ typedef enum _LX_MESSAGE_TYPE
     LxMessageWSLCUnixConnect,
     LxMessageWSLCGetGuestCapabilities,
     LxMessageWSLCGetGuestCapabilitiesResult,
+    LxInitMessageAddVirtualSmbShare,
+    LxInitMessageAddVirtualSmbShareResponse,
 } LX_MESSAGE_TYPE,
     *PLX_MESSAGE_TYPE;
 
@@ -522,6 +525,8 @@ inline auto ToString(LX_MESSAGE_TYPE messageType)
         X(LxMessageWSLCUnixConnect)
         X(LxMessageWSLCGetGuestCapabilities)
         X(LxMessageWSLCGetGuestCapabilitiesResult)
+        X(LxInitMessageAddVirtualSmbShare)
+        X(LxInitMessageAddVirtualSmbShareResponse)
 
     default:
         return "<unexpected LX_MESSAGE_TYPE>";
@@ -953,6 +958,7 @@ typedef enum _LX_INIT_FEATURE_FLAGS
     LxInitFeatureRootfsCompressed = 0x8,
     LxInitFeatureSystemDistro = 0x10,
     LxInitFeatureDnsTunneling = 0x20,
+    LxInitFeatureVirtualSmb = 0x40,
 } LX_INIT_FEATURE_FLAGS,
     *PLX_INIT_FEATURE_FLAGS;
 
@@ -1187,6 +1193,33 @@ typedef struct _LX_INIT_REMOUNT_VIRTIOFS_SHARE_MESSAGE
 
     PRETTY_PRINT(FIELD(Header), FIELD(Admin), STRING_FIELD(TagOffset));
 } LX_INIT_REMOUNT_VIRTIOFS_SHARE_MESSAGE, *PLX_INIT_REMOUNT_VIRTIOFS_SHARE_MESSAGE;
+
+typedef struct _LX_INIT_ADD_VIRTUALSMB_SHARE_RESPONSE_MESSAGE
+{
+    static inline auto Type = LxInitMessageAddVirtualSmbShareResponse;
+
+    MESSAGE_HEADER Header;
+    int Result;
+    unsigned int NameOffset;
+    unsigned int SourceOffset;
+    char Buffer[];
+
+    PRETTY_PRINT(FIELD(Header), FIELD(Result), STRING_FIELD(NameOffset), STRING_FIELD(SourceOffset));
+} LX_INIT_ADD_VIRTUALSMB_SHARE_RESPONSE_MESSAGE, *PLX_INIT_ADD_VIRTUALSMB_SHARE_RESPONSE_MESSAGE;
+
+typedef struct _LX_INIT_ADD_VIRTUALSMB_SHARE_MESSAGE
+{
+    static inline auto Type = LxInitMessageAddVirtualSmbShare;
+    using TResponse = LX_INIT_ADD_VIRTUALSMB_SHARE_RESPONSE_MESSAGE;
+
+    MESSAGE_HEADER Header;
+    bool Admin;
+    unsigned int PathOffset;
+    unsigned int OptionsOffset;
+    char Buffer[];
+
+    PRETTY_PRINT(FIELD(Header), FIELD(Admin), STRING_FIELD(PathOffset), STRING_FIELD(OptionsOffset));
+} LX_INIT_ADD_VIRTUALSMB_SHARE_MESSAGE, *PLX_INIT_ADD_VIRTUALSMB_SHARE_MESSAGE;
 
 //
 // The messages that can be sent to mini_init.

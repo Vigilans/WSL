@@ -35,6 +35,10 @@ using namespace std::chrono_literals;
 
 #define VIRTIOFS_TAG_DIR "/run/wsl/virtiofs"
 
+#define VSMB_MODULE_NAME "hv_vmsmb"
+#define VSMB_MODPROBE_PATH "/sbin/modprobe"
+#define VSMB_SHARE_DIR "/run/wsl/vsmb"
+
 #define LOG_STDERR(_errno) fprintf(stderr, "mount: %s\n", strerror(_errno))
 
 constexpr int c_exitCodeInvalidUsage = 1;
@@ -43,6 +47,8 @@ constexpr int c_exitCodeMountFail = 32;
 int MountFilesystem(const char* FsType, const char* Source, const char* Target, const char* Options, int* ExitCode = nullptr);
 
 int MountWithRetry(const char* Source, const char* Target, const char* FsType, const char* Options, int* ExitCode = nullptr);
+
+void SaveVsmbShareMapping(const char* Name, const char* Source);
 
 void SaveVirtiofsTagMapping(const char* Tag, const char* Source)
 
@@ -154,6 +160,146 @@ Return Value:
     Plan9Options += ";" PLAN9_SYMLINK_ROOT_OPTION;
     Plan9Options += Config.DrvFsPrefix;
     return {std::move(Plan9Options), std::move(StandardOptions)};
+}
+
+std::string ConvertDrvfsMountOptionsToVsmb(std::string_view Options, const wsl::linux::WslDistributionConfig& Config)
+
+/*++
+
+Routine Description:
+
+    This routine filters DrvFs mount options down to the set understood by the vsmb filesystem and
+    ensures a symlinkroot is present. DrvFs-specific options that vsmb does not implement (metadata mode,
+    case sensitivity, permission masks) are dropped; standard mount flags and the vsmb options (uid, gid,
+    file_mode, dir_mode, noperm, symlinkroot, actimeo) are preserved.
+
+Arguments:
+
+    Options - Supplies the DrvFs mount options.
+
+    Config - Supplies the distribution configuration.
+
+Return Value:
+
+    The vsmb mount options string.
+
+--*/
+
+{
+    using wsl::shared::string::StartsWith;
+
+    std::string VsmbOptions{};
+    bool hasSymlinkRoot = false;
+    while (!Options.empty())
+    {
+        auto Option = UtilStringNextToken(Options, ",");
+        if (Option.empty())
+        {
+            continue;
+        }
+
+        // Drop DrvFs-specific options the vsmb filesystem does not understand; passing them would fail the mount.
+        if ((Option == "metadata") || StartsWith(Option, PLAN9_CASE_OPTION) || StartsWith(Option, "umask=") ||
+            StartsWith(Option, "dmask=") || StartsWith(Option, "fmask=") || StartsWith(Option, "fallback="))
+        {
+            continue;
+        }
+
+        if (StartsWith(Option, PLAN9_SYMLINK_ROOT_OPTION))
+        {
+            hasSymlinkRoot = true;
+        }
+
+        if (!VsmbOptions.empty())
+        {
+            VsmbOptions += ',';
+        }
+
+        VsmbOptions += Option;
+    }
+
+    // Ensure Windows absolute-path symlinks resolve under the DrvFs prefix.
+    if (!hasSymlinkRoot)
+    {
+        if (!VsmbOptions.empty())
+        {
+            VsmbOptions += ',';
+        }
+
+        VsmbOptions += PLAN9_SYMLINK_ROOT_OPTION;
+        VsmbOptions += Config.DrvFsPrefix;
+    }
+
+    return VsmbOptions;
+}
+
+bool IsVsmbFilesystemRegistered(void)
+
+/*++
+
+Routine Description:
+
+    This routine checks whether the vsmb filesystem is registered with the kernel (because hv_vmsmb is
+    built in or already loaded).
+
+Return Value:
+
+    true if the vsmb filesystem is available, false otherwise.
+
+--*/
+
+try
+{
+    const auto Filesystems = UtilReadFileContent("/proc/filesystems");
+    std::string_view View{Filesystems};
+    while (!View.empty())
+    {
+        auto Line = UtilStringNextToken(View, "\n");
+
+        // Each line is "<nodev>\t<name>"; match the name after the tab.
+        const auto Tab = Line.rfind('\t');
+        const auto Name = (Tab == std::string_view::npos) ? Line : Line.substr(Tab + 1);
+        if (Name == VSMB_FS_TYPE)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+catch (...)
+{
+    // If /proc/filesystems can't be read, fall through to attempting modprobe.
+    return false;
+}
+
+void EnsureVsmbModuleLoaded(void)
+
+/*++
+
+Routine Description:
+
+    This routine ensures the hv_vmsmb module is loaded so the vsmb filesystem is available. It is a no-op
+    when the filesystem is already registered (built in or previously loaded).
+
+Return Value:
+
+    None.
+
+--*/
+
+{
+    if (IsVsmbFilesystemRegistered())
+    {
+        return;
+    }
+
+    const char* Argv[] = {VSMB_MODPROBE_PATH, VSMB_MODULE_NAME, nullptr};
+    int Status = -1;
+    if (UtilCreateProcessAndWait(VSMB_MODPROBE_PATH, Argv, &Status) < 0)
+    {
+        LOG_WARNING("Failed to load {} module: {}", VSMB_MODULE_NAME, Status);
+    }
 }
 
 bool IsDrvfsElevated(void)
@@ -357,6 +503,10 @@ try
     if (!UtilIsUtilityVm())
     {
         return MountFilesystem(DRVFS_FS_TYPE, Source, Target, Options, ExitCode);
+    }
+    else if (WSL_USE_VIRTUAL_SMB())
+    {
+        return MountVirtualSmb(Source, Target, Options, Admin, Config, ExitCode);
     }
     else if (WSL_USE_VIRTIO_FS())
     {
@@ -640,6 +790,110 @@ try
 }
 CATCH_RETURN_ERRNO()
 
+int MountVirtualSmb(const char* Source, const char* Target, const char* Options, std::optional<bool> Admin, const wsl::linux::WslDistributionConfig& Config, int* ExitCode)
+
+/*++
+
+Routine Description:
+
+    This routine mounts a DrvFs share over VirtualSmb. The wsl service hot-adds a VirtualSmb share for the
+    requested host path and returns the generated share name, which is then mounted via the vsmb filesystem.
+
+Arguments:
+
+    Source - Supplies the mount source (Windows path).
+
+    Target - Supplies the mount target.
+
+    Options - Supplies DrvFs mount options.
+
+    Admin - Supplies an optional boolean to specify if the admin or non-admin share should be used.
+
+    ExitCode - Supplies an optional pointer that receives the exit code.
+
+Return Value:
+
+    0 on success, -1 on failure.
+
+--*/
+
+try
+{
+    assert(WSL_USE_VIRTUAL_SMB());
+
+    //
+    // Check whether to use the elevated or non-elevated share.
+    //
+
+    if (!Admin.has_value())
+    {
+        Admin = IsDrvfsElevated();
+    }
+
+    //
+    // Ensure the vsmb filesystem is available before talking to the service.
+    //
+
+    EnsureVsmbModuleLoaded();
+
+    //
+    // Translate the DrvFs mount options into vsmb mount options.
+    //
+
+    const auto MountOptions = ConvertDrvfsMountOptionsToVsmb(Options ? Options : "", Config);
+
+    //
+    // Construct a request to add a VirtualSmb share.
+    //
+
+    wsl::shared::MessageWriter<LX_INIT_ADD_VIRTUALSMB_SHARE_MESSAGE> AddShare(LxInitMessageAddVirtualSmbShare);
+    AddShare->Admin = Admin.value();
+    AddShare.WriteString(AddShare->PathOffset, Source);
+    AddShare.WriteString(AddShare->OptionsOffset, "");
+
+    //
+    // Connect to the wsl service to add the share. If adding the share fails, fall back to mounting using Plan9.
+    //
+
+    wsl::shared::SocketChannel Channel{UtilConnectVsock(LX_INIT_UTILITY_VM_VIRTUALSMB_PORT, true), "VirtualSmb"};
+    if (Channel.Socket() < 0)
+    {
+        LOG_WARNING("Failed to connect to VirtualSmb service for {}, falling back to Plan9", Source);
+        return MountPlan9(Source, Target, Options, Admin, Config, ExitCode);
+    }
+
+    gsl::span<gsl::byte> ResponseSpan;
+    const auto& Response = Channel.Transaction<LX_INIT_ADD_VIRTUALSMB_SHARE_MESSAGE>(AddShare.Span(), &ResponseSpan);
+    if (Response.Result != 0)
+    {
+        LOG_WARNING("Add VirtualSmb share for {} failed {}, falling back to Plan9", Source, Response.Result);
+        return MountPlan9(Source, Target, Options, Admin, Config, ExitCode);
+    }
+
+    //
+    // Perform the mount operation using the share name returned by the service.
+    //
+
+    auto* Name = wsl::shared::string::FromSpan(ResponseSpan, Response.NameOffset);
+    auto* ResponseSource = wsl::shared::string::FromSpan(ResponseSpan, Response.SourceOffset);
+    if (MountWithRetry(Name, Target, VSMB_FS_TYPE, MountOptions.c_str(), ExitCode) < 0)
+    {
+        LOG_WARNING("vsmb mount for {} failed, falling back to Plan9", Source);
+        return MountPlan9(Source, Target, Options, Admin, Config, ExitCode);
+    }
+
+    //
+    // Save the share-name to source mapping so wslpath and mount tracking can resolve the Windows path.
+    //
+    // N.B. Use the source path from the response since the service canonicalizes it.
+    //
+
+    SaveVsmbShareMapping(Name, ResponseSource);
+
+    return 0;
+}
+CATCH_RETURN_ERRNO()
+
 int RemountVirtioFs(const char* Tag, const char* Target, const char* Options, bool Admin)
 
 /*++
@@ -742,6 +996,92 @@ try
     //
 
     auto LinkPath = std::format("{}/{}", VIRTIOFS_TAG_DIR, Tag);
+    return std::filesystem::read_symlink(LinkPath).string();
+}
+catch (...)
+{
+    LOG_CAUGHT_EXCEPTION();
+    return {};
+}
+
+void SaveVsmbShareMapping(const char* Name, const char* Source)
+
+/*++
+
+Routine Description:
+
+    This routine creates a symlink in VSMB_SHARE_DIR that maps a VirtualSmb share name to its Windows mount
+    source path, so QueryVsmbMountSource can resolve the name without talking to the service.
+
+Arguments:
+
+    Name - Supplies the VirtualSmb share name.
+
+    Source - Supplies the Windows path the share refers to.
+
+Return Value:
+
+    None.
+
+--*/
+
+{
+    // Validate the name is a GUID to prevent path traversal.
+    const auto Guid = wsl::shared::string::ToGuid(Name);
+    if (!Guid)
+    {
+        LOG_WARNING("Invalid VirtualSmb share name {}", Name);
+        return;
+    }
+
+    // Canonicalize path separators to backslashes before persisting.
+    std::string CanonicalSource{Source};
+    UtilCanonicalisePathSeparator(CanonicalSource, PATH_SEP_NT);
+
+    UtilMkdirPath(VSMB_SHARE_DIR, 0755);
+
+    auto LinkPath = std::format("{}/{}", VSMB_SHARE_DIR, Name);
+
+    unlink(LinkPath.c_str());
+    if (symlink(CanonicalSource.c_str(), LinkPath.c_str()) < 0)
+    {
+        LOG_WARNING("Failed to create VirtualSmb share symlink {} -> {}: {}", LinkPath, CanonicalSource, errno);
+    }
+}
+
+std::string QueryVsmbMountSource(const char* Name)
+
+/*++
+
+Routine Description:
+
+    This routine takes a VirtualSmb share name and determines the Windows path it refers to by reading the
+    symlink created during mount.
+
+Arguments:
+
+    Name - Supplies the VirtualSmb share name to query.
+
+Return Value:
+
+    The mount source, an empty string on failure.
+
+--*/
+
+try
+{
+    if (!WSL_USE_VIRTUAL_SMB())
+    {
+        return {};
+    }
+
+    const auto Guid = wsl::shared::string::ToGuid(Name);
+    if (!Guid)
+    {
+        return {};
+    }
+
+    auto LinkPath = std::format("{}/{}", VSMB_SHARE_DIR, Name);
     return std::filesystem::read_symlink(LinkPath).string();
 }
 catch (...)
