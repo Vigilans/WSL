@@ -2282,6 +2282,8 @@ std::pair<std::wstring, std::wstring> WslCoreVm::AddVirtualSmbShare(_In_ bool Ad
         // opens files using the identity that opened the share root.
         request.Settings.Options.TakeBackupPrivilege = true;
         request.Settings.Options.UseShareRootIdentity = true;
+        // DrvFs transfers file data with SMB READ/WRITE.
+        request.Settings.Options.NoDirectmap = true;
 
         wsl::windows::common::hcs::ModifyComputeSystem(m_system.get(), wsl::shared::ToJsonW(request).c_str());
 

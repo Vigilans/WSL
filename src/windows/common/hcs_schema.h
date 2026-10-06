@@ -414,6 +414,7 @@ struct VirtualSmbShareOptions
 {
     bool TakeBackupPrivilege = false;
     bool UseShareRootIdentity = false;
+    bool NoDirectmap = false;
 };
 
 inline void to_json(nlohmann::json& j, const VirtualSmbShareOptions& options)
@@ -425,6 +426,8 @@ inline void to_json(nlohmann::json& j, const VirtualSmbShareOptions& options)
         j["TakeBackupPrivilege"] = true;
     if (options.UseShareRootIdentity)
         j["UseShareRootIdentity"] = true;
+    if (options.NoDirectmap)
+        j["NoDirectmap"] = true;
 }
 
 struct VirtualSmbShare
